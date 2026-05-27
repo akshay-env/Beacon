@@ -5,6 +5,7 @@ from google import genai
 from google.genai import types
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.http.exceptions import UnexpectedResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,11 +40,9 @@ def get_embeddings(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> l
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                # Rate limit hit — wait a full minute for the quota window to reset
                 wait = RATE_LIMIT_WAIT
                 print(f"  [Attempt {attempt + 1}/{MAX_RETRIES}] Rate limit hit. Waiting {wait}s for quota reset...")
             else:
-                # Other error — exponential backoff
                 wait = 2 ** attempt
                 print(f"  [Attempt {attempt + 1}/{MAX_RETRIES}] Embedding failed: {e}. Retrying in {wait}s...")
             time.sleep(wait)
@@ -51,20 +50,68 @@ def get_embeddings(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> l
     raise RuntimeError(f"Failed to embed batch after {MAX_RETRIES} retries.")
 
 
-def embed_and_store(chunks: list[dict]):
+def _get_existing_count() -> int:
+    """Return how many points are already in the 'docs' collection, or 0 if it doesn't exist."""
+    try:
+        info = qdrant.get_collection("docs")
+        return info.points_count or 0
+    except UnexpectedResponse:
+        return 0
+
+
+def _ensure_collection():
+    """Create the collection if it doesn't exist yet. Never wipes existing data."""
+    try:
+        qdrant.get_collection("docs")
+    except UnexpectedResponse:
+        qdrant.create_collection(
+            collection_name="docs",
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
+        )
+        print("  Created fresh 'docs' collection.")
+
+
+def embed_and_store(chunks: list[dict], fresh: bool = False):
     """
     Embed all chunks and store them in Qdrant.
-    Processes in batches of BATCH_SIZE with rate-limit-safe pacing.
+
+    Supports resumable indexing — if interrupted, re-running will pick up
+    from where it left off instead of starting over.
+
+    Args:
+        chunks: All chunks from the chunker (full list every time).
+        fresh:  If True, wipe the collection and re-index from scratch.
+                If False (default), skip already-indexed chunks and resume.
     """
-    qdrant.recreate_collection(
-        collection_name="docs",
-        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
-    )
+    if fresh:
+        # Explicit full re-index requested — wipe and recreate
+        try:
+            qdrant.delete_collection("docs")
+        except Exception:
+            pass
+        qdrant.create_collection(
+            collection_name="docs",
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
+        )
+        already_stored = 0
+        print("  Wiped and recreated 'docs' collection.")
+    else:
+        _ensure_collection()
+        already_stored = _get_existing_count()
 
     total = len(chunks)
-    print(f"Embedding and storing {total} chunks using Gemini API ({EMBEDDING_MODEL})...")
 
-    for i in range(0, total, BATCH_SIZE):
+    if already_stored >= total:
+        print(f"All {total} chunks already indexed. Nothing to do.")
+        return
+
+    if already_stored > 0:
+        print(f"Resuming from chunk {already_stored}/{total} (skipping already-indexed).")
+
+    print(f"Embedding and storing chunks {already_stored + 1}–{total} "
+          f"using Gemini API ({EMBEDDING_MODEL})...")
+
+    for i in range(already_stored, total, BATCH_SIZE):
         batch = chunks[i : i + BATCH_SIZE]
         texts = [chunk["text"] for chunk in batch]
 

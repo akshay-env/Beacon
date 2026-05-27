@@ -51,9 +51,9 @@ def retrieve(query: str, top_k: int = 20) -> list[dict]:
     """
     query_vector = _embed_query(query)
 
-    hits = qdrant.search(
+    hits = qdrant.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
+        query=query_vector,
         limit=top_k,
         with_payload=True,
     )
@@ -65,7 +65,7 @@ def retrieve(query: str, top_k: int = 20) -> list[dict]:
             "breadcrumb": hit.payload.get("breadcrumb", ""),
             "score": round(hit.score, 4),
         }
-        for hit in hits
+        for hit in hits.points
     ]
 
 

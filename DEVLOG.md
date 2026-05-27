@@ -145,4 +145,83 @@ Both techniques feed into `expand_query()` which returns `[original_query, rewri
 | Reranking | LLM-as-judge (Gemini) | No local cross-encoder dependency; single API call for all chunks |
 | Final output | top_n=5 | Enough context without flooding the generator prompt |
 
+---
+
+## May 27, 2026
+
+### Built the generation layer
+
+Today was the last core component before the API — the generator that takes retrieved chunks and produces an actual answer.
+
+**`generator.py`** — two public functions:
+
+- `generate(query, chunks)` — takes a query + pre-retrieved chunks, builds a numbered context block, and calls Gemini with a carefully structured prompt. Returns `{ answer, sources, chunks_used, model }`.
+- `ask(query, ...)` — full end-to-end RAG in one call: internally runs `retrieval.pipeline.search()` then `generate()`. This is what the API will call.
+
+**The prompt design matters a lot here.** I used a multi-turn conversation structure instead of a single user message — the system instruction goes as the first user turn, the model acknowledges it, then the actual context + question follows. This gets better instruction-following than cramming everything into one big message.
+
+Key rules baked into the prompt:
+- Answer ONLY from the provided passages — no hallucination
+- Cite inline with [N] notation (e.g. "Use `app.add_middleware()` [1]")
+- If the context doesn't contain the answer, say so explicitly — don't make something up
+- Include code examples from the passages when they help
+
+Each context chunk includes its breadcrumb (e.g. "FastAPI > Middleware") as a header before the text, giving the model structural context about where the chunk came from.
+
+**Rate limit handling** — added the same 429-aware retry logic as the embedder: waits 60s on rate limit errors, exponential backoff on other errors, up to 8 retries. The smoke test hit a 429 immediately (quota exhausted from the embedding run), which confirmed the retry path works — it catches the error gracefully.
+
+### Architecture decisions (generation layer)
+
+| Decision | Choice | Reasoning |
+|---|---|---|
+| Generation model | `gemini-2.0-flash` | Fast, available, good instruction following |
+| Prompt structure | Multi-turn conversation | Better instruction following than a single long message |
+| Citation format | Inline [N] | Traceable, standard academic/RAG style |
+| No-answer handling | Explicit refusal message | Faithfulness — better to say "I don't know" than hallucinate |
+| Rate limit retry | 60s wait, 8 retries | Consistent with the rest of the pipeline |
+
+---
+
+### Problem: `QdrantClient` has no attribute `search`
+
+First real end-to-end test crashed immediately with:
+```
+AttributeError: 'QdrantClient' object has no attribute 'search'
+```
+
+Installed `qdrant-client` is v1.18.0. In v1.7+, `client.search()` was deprecated and fully removed by v1.18. The replacement is `client.query_points()` — same purpose, but `query_vector=` → `query=` and results come back as a `QueryResponse` object where hits are at `.points`, not iterated directly.
+
+**Fix:** Updated `retrieval/retriever.py` to use `query_points()`.
+
+---
+
+### Problem: `gemini-2.0-flash` daily free tier quota exhausted
+
+Query rewriter and generator both hit 429 with `limit: 0` — the daily free tier request quota for `gemini-2.0-flash` was fully consumed by the embedding run and testing.
+
+**Fix:** Switched `query_rewriter.py`, `reranker.py`, and `generator.py` from `gemini-2.0-flash` → `gemini-2.0-flash-lite`. Separate quota bucket, more than capable enough for rewriting, scoring, and grounded generation from short context.
+
+Then hit the same issue on `gemini-2.0-flash-lite` too. Switched again to `gemini-2.5-flash`.
+
+---
+
+### Problem: Retrieval returning completely wrong documents
+
+The test showed the pipeline running end-to-end — retrieved 24 chunks, reranked, generated — but every answer was "I don't have enough information." Looking at the source files returned: OAuth2 scopes and release notes for a middleware question. Clearly wrong.
+
+Root cause: `run.py` was interrupted by the embedding rate limit after only 29 chunks (less than one batch). But `embed_and_store` called `recreate_collection` at the start of every run — so each restart wiped the collection and started from zero. We never accumulated any meaningful data across runs.
+
+The core design mistake was that a single-run assumption baked into the indexer: wipe + rebuild. That's fine when the run always completes, but catastrophic when interrupted by API rate limits.
+
+**Fix — resumable incremental indexing:**
+
+Rewrote `embed_and_store` to:
+1. Check how many points already exist in the collection
+2. Skip that many chunks at the start of the run (they're already stored)
+3. Continue embedding from where it left off
+
+The `recreate_collection` call was replaced with `_ensure_collection()` (create if not exists, leave alone if it does) + a point count check. Added an explicit `fresh=True` flag for when a full re-index is genuinely needed.
+
+Net effect: re-running `run.py` after an interrupted run will now pick up from chunk 30 (or wherever it stopped) instead of starting over from 0.
+
 
