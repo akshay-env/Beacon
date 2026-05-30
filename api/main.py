@@ -12,16 +12,19 @@ Run with:
   uvicorn api.main:app --reload --port 8000
 """
 
+import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from generation.generator import ask, GENERATION_MODEL
+from generation.generator import ask, generate_stream, _extract_sources, GENERATION_MODEL
 from ingestion.embedder import EMBEDDING_MODEL, EMBEDDING_DIM
 
 # ---------------------------------------------------------------------------
@@ -217,4 +220,54 @@ async def stats():
         embedding_model=EMBEDDING_MODEL,
         embedding_dim=EMBEDDING_DIM,
         generation_model=GENERATION_MODEL,
+    )
+
+
+@app.post("/ask/stream", summary="Ask a question (streaming)")
+async def ask_stream(request: AskRequest):
+    """
+    Streaming version of POST /ask using Server-Sent Events (SSE).
+
+    The response streams as a sequence of SSE events:
+      - Token events:  data: {"token": "...text..."}
+      - Final event:   data: {"done": true, "sources": [...], "model": "..."}
+
+    Retrieval runs first (one shot), then generation streams token-by-token.
+    This means the client sees the first tokens within ~1-2s instead of
+    waiting 10-15s for the full answer to be ready.
+
+    Connect with EventSource in a browser or with any SSE client.
+    """
+    if _get_chunk_count() == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="No documents indexed. Run `python run.py` first."
+        )
+
+    # Run retrieval synchronously (it's a one-shot operation)
+    from retrieval.pipeline import search
+    try:
+        chunks = await asyncio.to_thread(
+            search, request.query, request.top_k, request.top_n,
+            request.use_hyde, request.use_rerank
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Retrieval error: {e}")
+
+    async def event_generator():
+        # Stream generation tokens
+        async for token in generate_stream(request.query, chunks):
+            yield f"data: {json.dumps({'token': token})}\n\n"
+
+        # Final event: sources + done signal
+        sources = _extract_sources(chunks)
+        yield f"data: {json.dumps({'done': True, 'sources': sources, 'model': GENERATION_MODEL})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering if behind a proxy
+        },
     )

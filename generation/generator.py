@@ -198,3 +198,63 @@ def ask(
 
     print(f"[RAG] Done.\n")
     return result
+
+
+async def generate_stream(query: str, chunks: list[dict]):
+    """
+    Async generator that streams the Gemini answer token-by-token.
+
+    Yields plain text tokens as they arrive from the model.
+    The caller (API layer) is responsible for SSE formatting.
+
+    Uses the sync generate_content_stream() API wrapped in asyncio.to_thread
+    so each token fetch is non-blocking and doesn't stall the event loop.
+
+    Args:
+        query:  The original user question.
+        chunks: Retrieved + reranked chunks (same as passed to generate()).
+
+    Yields:
+        str — individual text tokens from the model stream.
+    """
+    import asyncio
+
+    if not chunks:
+        yield "I don't have enough information in the provided context to answer this."
+        return
+
+    context_block = _build_context_block(chunks)
+    user_message = _CONTEXT_TEMPLATE.format(
+        context_block=context_block,
+        query=query
+    )
+
+    contents = [
+        {"role": "user",  "parts": [{"text": _SYSTEM_PROMPT}]},
+        {"role": "model", "parts": [{"text": "Understood. I will answer only from the provided passages and cite sources using [N] notation."}]},
+        {"role": "user",  "parts": [{"text": user_message}]},
+    ]
+
+    # Start the sync streaming iterator in a thread so it doesn't block
+    def _start_stream():
+        return client.models.generate_content_stream(
+            model=GENERATION_MODEL,
+            contents=contents
+        )
+
+    stream = await asyncio.to_thread(_start_stream)
+
+    # Fetch each token in a thread — keeps the event loop free
+    while True:
+        try:
+            chunk = await asyncio.to_thread(next, stream)
+            if chunk.text:
+                yield chunk.text
+        except StopIteration:
+            break
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                # On rate limit during stream, yield a notice and stop
+                yield "\n\n[Rate limit hit — please retry in a moment.]"
+            break

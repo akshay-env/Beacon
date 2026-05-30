@@ -4,9 +4,14 @@ import time
 from google import genai
 from google.genai import types
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.models import (
+    VectorParams, Distance, PointStruct,
+    SparseVectorParams, SparseVector,
+)
 from qdrant_client.http.exceptions import UnexpectedResponse
 from dotenv import load_dotenv
+
+from ingestion.sparse import build_sparse_vector
 
 load_dotenv()
 
@@ -18,6 +23,9 @@ BATCH_SIZE = 100          # max texts per API call — saturates each request
 SLEEP_BETWEEN_BATCHES = 15   # seconds between batches — ~4 req/min, safe for free tier
 RATE_LIMIT_WAIT = 60         # seconds to wait on a 429 — full quota window reset
 MAX_RETRIES = 8              # higher since 429s just need time, not a failure signal
+
+COLLECTION_NAME = "docs"
+SPARSE_VECTOR_NAME = "text_sparse"   # named sparse vector field in Qdrant
 
 qdrant = QdrantClient("localhost", port=6333)
 
@@ -51,29 +59,37 @@ def get_embeddings(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> l
 
 
 def _get_existing_count() -> int:
-    """Return how many points are already in the 'docs' collection, or 0 if it doesn't exist."""
+    """Return how many points are already in the collection, or 0 if it doesn't exist."""
     try:
-        info = qdrant.get_collection("docs")
+        info = qdrant.get_collection(COLLECTION_NAME)
         return info.points_count or 0
     except UnexpectedResponse:
         return 0
 
 
 def _ensure_collection():
-    """Create the collection if it doesn't exist yet. Never wipes existing data."""
+    """
+    Create the collection if it doesn't exist yet. Never wipes existing data.
+    Collection schema:
+      - Default unnamed dense vector (3072-dim, cosine)
+      - Named sparse vector 'text_sparse' (for hybrid BM25-style search)
+    """
     try:
-        qdrant.get_collection("docs")
+        qdrant.get_collection(COLLECTION_NAME)
     except UnexpectedResponse:
         qdrant.create_collection(
-            collection_name="docs",
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            sparse_vectors_config={
+                SPARSE_VECTOR_NAME: SparseVectorParams()
+            }
         )
-        print("  Created fresh 'docs' collection.")
+        print(f"  Created fresh '{COLLECTION_NAME}' collection (dense + sparse).")
 
 
 def embed_and_store(chunks: list[dict], fresh: bool = False):
     """
-    Embed all chunks and store them in Qdrant.
+    Embed all chunks and store them in Qdrant with both dense and sparse vectors.
 
     Supports resumable indexing — if interrupted, re-running will pick up
     from where it left off instead of starting over.
@@ -84,17 +100,19 @@ def embed_and_store(chunks: list[dict], fresh: bool = False):
                 If False (default), skip already-indexed chunks and resume.
     """
     if fresh:
-        # Explicit full re-index requested — wipe and recreate
         try:
-            qdrant.delete_collection("docs")
+            qdrant.delete_collection(COLLECTION_NAME)
         except Exception:
             pass
         qdrant.create_collection(
-            collection_name="docs",
-            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE)
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+            sparse_vectors_config={
+                SPARSE_VECTOR_NAME: SparseVectorParams()
+            }
         )
         already_stored = 0
-        print("  Wiped and recreated 'docs' collection.")
+        print(f"  Wiped and recreated '{COLLECTION_NAME}' collection (dense + sparse).")
     else:
         _ensure_collection()
         already_stored = _get_existing_count()
@@ -115,21 +133,30 @@ def embed_and_store(chunks: list[dict], fresh: bool = False):
         batch = chunks[i : i + BATCH_SIZE]
         texts = [chunk["text"] for chunk in batch]
 
-        embeddings = get_embeddings(texts, task_type="RETRIEVAL_DOCUMENT")
+        dense_embeddings = get_embeddings(texts, task_type="RETRIEVAL_DOCUMENT")
 
         points = []
-        for j, embedding in enumerate(embeddings):
+        for j, dense_vec in enumerate(dense_embeddings):
+            chunk = batch[j]
+            sparse_dict = build_sparse_vector(chunk["text"])
+
             points.append(PointStruct(
                 id=str(uuid.uuid4()),
-                vector=embedding,
+                vector={
+                    "": dense_vec,              # unnamed default dense vector
+                    SPARSE_VECTOR_NAME: SparseVector(
+                        indices=list(sparse_dict.keys()),
+                        values=list(sparse_dict.values()),
+                    ),
+                },
                 payload={
-                    "text": batch[j]["text"],
-                    "source": batch[j]["source"],
-                    "breadcrumb": batch[j].get("breadcrumb", "")
+                    "text":       chunk["text"],
+                    "source":     chunk["source"],
+                    "breadcrumb": chunk.get("breadcrumb", ""),
                 }
             ))
 
-        qdrant.upsert(collection_name="docs", points=points)
+        qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
         stored_so_far = min(i + BATCH_SIZE, total)
         print(f"  Stored {stored_so_far}/{total} chunks")
 

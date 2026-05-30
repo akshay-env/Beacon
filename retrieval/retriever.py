@@ -3,7 +3,10 @@ import time
 from google import genai
 from google.genai import types
 from qdrant_client import QdrantClient
+from qdrant_client.models import Prefetch, SparseVector, Fusion
 from dotenv import load_dotenv
+
+from ingestion.sparse import build_sparse_vector
 
 load_dotenv()
 
@@ -12,6 +15,7 @@ qdrant = QdrantClient("localhost", port=6333)
 
 EMBEDDING_MODEL = "models/gemini-embedding-2"
 COLLECTION_NAME = "docs"
+SPARSE_VECTOR_NAME = "text_sparse"
 RATE_LIMIT_WAIT = 60
 MAX_RETRIES = 8
 
@@ -46,24 +50,62 @@ def _embed_query(text: str) -> list[float]:
 
 def retrieve(query: str, top_k: int = 20) -> list[dict]:
     """
-    Embed a query and search Qdrant for the top_k most similar chunks.
-    Returns results as a list of dicts with text, source, breadcrumb, score.
-    """
-    query_vector = _embed_query(query)
+    Hybrid search: combines dense semantic search + sparse keyword search
+    via Qdrant's native Reciprocal Rank Fusion (RRF).
 
-    hits = qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_vector,
-        limit=top_k,
-        with_payload=True,
-    )
+    How it works:
+      1. Dense leg:   embed query → cosine similarity search over Gemini vectors
+      2. Sparse leg:  tokenize query → TF keyword search over sparse vectors
+      3. RRF fusion:  Qdrant merges both ranked lists using RRF scoring
+                      (rank_score = Σ 1/(k + rank_i) for each result list)
+
+    Dense search excels at semantic similarity ("how do I handle errors?").
+    Sparse search excels at exact term matching ("HTTPException", "Depends").
+    Together they cover what neither does alone.
+
+    Falls back to dense-only search if sparse vectors aren't present
+    (e.g. collection was indexed with the old schema).
+    """
+    dense_vector = _embed_query(query)
+    sparse_dict = build_sparse_vector(query)
+
+    try:
+        # Hybrid search with RRF
+        hits = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            prefetch=[
+                Prefetch(
+                    query=dense_vector,
+                    limit=top_k,
+                ),
+                Prefetch(
+                    query=SparseVector(
+                        indices=list(sparse_dict.keys()),
+                        values=list(sparse_dict.values()),
+                    ),
+                    using=SPARSE_VECTOR_NAME,
+                    limit=top_k,
+                ),
+            ],
+            query=Fusion.RRF,
+            limit=top_k,
+            with_payload=True,
+        )
+    except Exception:
+        # Fallback: dense-only search (for collections without sparse vectors)
+        hits = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=dense_vector,
+            limit=top_k,
+            with_payload=True,
+        )
 
     return [
         {
-            "text": hit.payload.get("text", ""),
-            "source": hit.payload.get("source", ""),
+            "text":       hit.payload.get("text", ""),
+            "source":     hit.payload.get("source", ""),
             "breadcrumb": hit.payload.get("breadcrumb", ""),
-            "score": round(hit.score, 4),
+            "score":      round(hit.score, 4),
         }
         for hit in hits.points
     ]

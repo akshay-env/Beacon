@@ -17,7 +17,8 @@ try:
     chunks = chunk_docs(docs)
     print(f"Chunks created: {len(chunks)}")
 
-    embed_and_store(chunks)
+    fresh = "--fresh" in sys.argv
+    embed_and_store(chunks, fresh=fresh)
     print("Done!")
 
 except Exception as e:
