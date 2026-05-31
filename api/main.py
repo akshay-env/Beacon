@@ -15,11 +15,13 @@ Run with:
 import asyncio
 import json
 import time
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -271,3 +273,19 @@ async def ask_stream(request: AskRequest):
             "X-Accel-Buffering": "no",   # disable nginx buffering if behind a proxy
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Static Frontend
+# ---------------------------------------------------------------------------
+
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+
+@app.get("/", summary="Web Chat UI")
+async def serve_ui():
+    """Serve the index.html Web Chat UI."""
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+# Mount the rest of the frontend static files (css, js)
+app.mount("/", StaticFiles(directory=FRONTEND_DIR), name="frontend")
+

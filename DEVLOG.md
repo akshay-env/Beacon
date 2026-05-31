@@ -297,6 +297,46 @@ I chose LLM-as-judge over traditional NLP metrics (BLEU, ROUGE, etc.) because th
 | Testset persistence | JSON file | Generate once, reuse across evaluation runs |
 | Rate limit handling | 3-5s sleeps between calls | Multiple Gemini calls per test case — need to pace carefully |
 
+---
 
+## May 30, 2026
 
+### Additional Features: Hybrid Search & Streaming
 
+Implemented two highly impactful features to push the RAG pipeline closer to a production-ready assistant.
+
+**1. Hybrid Search (Dense + Sparse with RRF)**
+- **Why:** Pure semantic vector search (dense embeddings) is great for understanding intent but terrible at exact keyword matching. Users asking about specific code tokens (e.g. `Depends`, `HTTPException`) would get contextually similar but exactly wrong chunks.
+- **How:** 
+  - Added `ingestion/sparse.py` to generate TF (Term Frequency) based sparse vectors. Used a deterministic CRC32 hash for vocabulary mapping to avoid full-corpus IDF dependencies, which plays nicely with our resumable incremental indexing.
+  - Updated `ingestion/embedder.py` to store both the dense Gemini embedding and the sparse TF vector in Qdrant under a modified collection schema.
+  - Updated `retrieval/retriever.py` to use Qdrant's native Reciprocal Rank Fusion (RRF) to merge the results from the dense semantic query and the sparse keyword query.
+  - Updated `run.py` to support a `--fresh` flag to allow easy schema wiping/re-indexing.
+
+**2. Streaming Generation (SSE)**
+- **Why:** Waiting 10-15 seconds for a complete generated answer is bad UX. Users want to see the model typing immediately.
+- **How:** 
+  - Added an async `generate_stream()` generator function to `generation/generator.py` that yields tokens one by one as they arrive from the Gemini API. Wrapped the synchronous Gemini API call in `asyncio.to_thread` to prevent blocking the FastAPI event loop.
+  - Added a new `POST /ask/stream` endpoint to `api/main.py`. This endpoint first runs the retrieval synchronously, then returns a `StreamingResponse` using Server-Sent Events (SSE). It streams token events followed by a final event containing the sources and model info.
+
+---
+
+## May 31, 2026
+
+### Built the Web Chat UI
+
+Testing streaming endpoints via `curl` doesn't provide the true experience. We needed a UI.
+
+Built a sleek, modern front-end using Vanilla HTML, CSS, and JS. It is served directly from our existing FastAPI server.
+
+**`frontend/index.html` & `frontend/style.css`**:
+- Premium dark-mode aesthetic with glassmorphism header.
+- Custom scrollbars, responsive flex layout, and modern micro-animations (e.g., blinking cursor, message fade-in).
+
+**`frontend/app.js`**:
+- Connects to the `POST /ask/stream` endpoint using the `fetch` API.
+- Parses the SSE stream on the fly.
+- Uses `marked.js` to render Markdown chunks directly in the browser as they stream in.
+- Appends clickable source pills to the bottom of the bot's message once the `done` event is received.
+
+**`api/main.py`** was updated to mount the `frontend/` directory using FastAPI's `StaticFiles`, serving `index.html` at the root `/` path.

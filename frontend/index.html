@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gatekeeper-RAG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- Marked.js for Markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">Gatekeeper<span class="highlight">RAG</span></div>
+            <div class="status-indicator">
+                <span class="dot"></span> Ready
+            </div>
+        </header>
+        
+        <main id="chat-container">
+            <div class="message system">
+                <div class="message-content">
+                    <p>Welcome to Gatekeeper-RAG! Ask me anything about the FastAPI documentation.</p>
+                </div>
+            </div>
+        </main>
+        
+        <div class="input-area">
+            <form id="chat-form">
+                <input type="text" id="user-input" placeholder="Ask a question (e.g. 'How do I add middleware?')" autocomplete="off" autofocus>
+                <button type="submit" id="send-button">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </form>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
