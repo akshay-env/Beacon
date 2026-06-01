@@ -340,3 +340,17 @@ Built a sleek, modern front-end using Vanilla HTML, CSS, and JS. It is served di
 - Appends clickable source pills to the bottom of the bot's message once the `done` event is received.
 
 **`api/main.py`** was updated to mount the `frontend/` directory using FastAPI's `StaticFiles`, serving `index.html` at the root `/` path.
+
+---
+
+## June 01, 2026
+
+### Conversational Memory (Multi-turn Chat)
+
+Added multi-turn conversational memory so users can ask follow-up questions referencing previous answers (e.g., using pronouns like "it", "that").
+
+**How it works:**
+1. **Frontend (`app.js`)**: Now tracks the `chatHistory` array (keeping the last 3 turns / 6 messages to save token space). It sends this history in the `POST /ask/stream` request body.
+2. **API (`main.py`)**: Added a `HistoryItem` Pydantic model to `AskRequest` to properly validate the incoming history array.
+3. **Query Rewriter (`query_rewriter.py`)**: Added a new `_CONTEXTUALIZE_PROMPT`. Before expanding or embedding a query, Gemini looks at the chat history and rewrites the user's latest question into a standalone, context-free search query (e.g., "Show me an example of it" -> "Show me an example of async middleware in FastAPI").
+4. **Generator (`generator.py`)**: The history array is formatted and injected directly into the generation prompt as `user`/`model` message pairs just above the final query. This gives the generator the conversational context needed to write coherent follow-up answers.

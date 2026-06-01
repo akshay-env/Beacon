@@ -98,7 +98,7 @@ def _extract_sources(chunks: list[dict]) -> list[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate(query: str, chunks: list[dict]) -> dict:
+def generate(query: str, chunks: list[dict], history: list[dict] = None) -> dict:
     """
     Generate a grounded answer from retrieved chunks.
 
@@ -128,16 +128,26 @@ def generate(query: str, chunks: list[dict]) -> dict:
         query=query
     )
 
+    contents = [
+        {"role": "user", "parts": [{"text": _SYSTEM_PROMPT}]},
+        {"role": "model", "parts": [{"text": "Understood. I will answer only from the provided passages and cite sources using [N] notation."}]}
+    ]
+
+    # Inject conversation history
+    if history:
+        for msg in history:
+            role = "model" if msg["role"] == "bot" else "user"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    # Finally, append the current query with the retrieved context passages
+    contents.append({"role": "user", "parts": [{"text": user_message}]})
+
     answer = None
     for attempt in range(MAX_RETRIES):
         try:
             response = client.models.generate_content(
                 model=GENERATION_MODEL,
-                contents=[
-                    {"role": "user", "parts": [{"text": _SYSTEM_PROMPT}]},
-                    {"role": "model", "parts": [{"text": "Understood. I will answer only from the provided passages and cite sources using [N] notation."}]},
-                    {"role": "user", "parts": [{"text": user_message}]},
-                ]
+                contents=contents
             )
             answer = response.text.strip()
             break
@@ -168,6 +178,7 @@ def ask(
     top_n: int = 5,
     use_hyde: bool = True,
     use_rerank: bool = True,
+    history: list[dict] = None,
 ) -> dict:
     """
     Full end-to-end RAG pipeline: retrieval + generation in one call.
@@ -191,16 +202,16 @@ def ask(
     print(f"[RAG] Query: {query!r}")
 
     chunks = search(query, top_k=top_k, top_n=top_n,
-                    use_hyde=use_hyde, use_rerank=use_rerank)
+                    use_hyde=use_hyde, use_rerank=use_rerank, history=history)
 
     print(f"[RAG] Generating answer from {len(chunks)} chunks...")
-    result = generate(query, chunks)
+    result = generate(query, chunks, history=history)
 
     print(f"[RAG] Done.\n")
     return result
 
 
-async def generate_stream(query: str, chunks: list[dict]):
+async def generate_stream(query: str, chunks: list[dict], history: list[dict] = None):
     """
     Async generator that streams the Gemini answer token-by-token.
 
@@ -231,9 +242,17 @@ async def generate_stream(query: str, chunks: list[dict]):
 
     contents = [
         {"role": "user",  "parts": [{"text": _SYSTEM_PROMPT}]},
-        {"role": "model", "parts": [{"text": "Understood. I will answer only from the provided passages and cite sources using [N] notation."}]},
-        {"role": "user",  "parts": [{"text": user_message}]},
+        {"role": "model", "parts": [{"text": "Understood. I will answer only from the provided passages and cite sources using [N] notation."}]}
     ]
+
+    # Inject conversation history
+    if history:
+        for msg in history:
+            role = "model" if msg["role"] == "bot" else "user"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    # Append current query + context
+    contents.append({"role": "user", "parts": [{"text": user_message}]})
 
     # Start the sync streaming iterator in a thread so it doesn't block
     def _start_stream():

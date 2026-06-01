@@ -23,6 +23,19 @@ User question: {query}
 
 Rewritten query (one line, no explanation):"""
 
+_CONTEXTUALIZE_PROMPT = """\
+Given a chat history and the latest user question which might reference context \
+in the chat history (e.g. using pronouns like "it", "that", "this"), formulate a \
+standalone question which can be understood without the chat history. \
+Do NOT answer the question, just reformulate it if needed and otherwise return it as is.
+
+Chat History:
+{history_str}
+
+Latest User Question: {query}
+
+Standalone Question:"""
+
 _HYDE_PROMPT = """\
 You are a technical documentation expert.
 
@@ -40,19 +53,23 @@ Hypothetical documentation passage:"""
 # Public API
 # ---------------------------------------------------------------------------
 
-def rewrite_query(query: str) -> str:
+def rewrite_query(query: str, history: list[dict] = None) -> str:
     """
     Rewrite the user's query to be more precise for vector search.
-    Strips filler words and focuses on technical terminology.
+    If history is provided, contextualize the query first.
     """
-    prompt = _REWRITE_PROMPT.format(query=query)
+    if history:
+        history_str = "\n".join([f"{h['role'].capitalize()}: {h['content']}" for h in history])
+        prompt = _CONTEXTUALIZE_PROMPT.format(history_str=history_str, query=query)
+    else:
+        prompt = _REWRITE_PROMPT.format(query=query)
+        
     try:
         response = client.models.generate_content(
             model=GENERATION_MODEL,
             contents=prompt
         )
         rewritten = response.text.strip()
-        # Safety: if the model returns something empty or too long, fall back
         if not rewritten or len(rewritten) > 500:
             return query
         return rewritten
@@ -61,17 +78,16 @@ def rewrite_query(query: str) -> str:
         return query
 
 
-def generate_hyde_passage(query: str) -> str:
+def generate_hyde_passage(query: str, history: list[dict] = None) -> str:
     """
     Generate a Hypothetical Document Embedding (HyDE) passage.
-
-    HyDE (Gao et al. 2022) works by generating a fake-but-plausible answer,
-    embedding it, and searching for real documents that are close to that
-    embedding. This dramatically improves recall for precise factual questions
-    because the hypothetical passage lands in the right semantic neighbourhood
-    even when the raw question doesn't.
     """
-    prompt = _HYDE_PROMPT.format(query=query)
+    # If we have history, contextualize the query first so HyDE isn't confused by pronouns
+    actual_query = query
+    if history:
+        actual_query = rewrite_query(query, history)
+        
+    prompt = _HYDE_PROMPT.format(query=actual_query)
     try:
         response = client.models.generate_content(
             model=GENERATION_MODEL,
@@ -79,26 +95,22 @@ def generate_hyde_passage(query: str) -> str:
         )
         passage = response.text.strip()
         if not passage:
-            return query
+            return actual_query
         return passage
     except Exception as e:
         print(f"  [QueryRewriter] HyDE generation failed: {e}. Using original query.")
-        return query
+        return actual_query
 
 
-def expand_query(query: str) -> list[str]:
+def expand_query(query: str, history: list[dict] = None) -> list[str]:
     """
-    Full query expansion pipeline. Returns a list of query variants to search with:
-      1. The original query (always included)
-      2. The rewritten/keyword-focused query
-      3. The HyDE passage (fake documentation passage)
-
-    The retriever will search with all three and merge results.
+    Full query expansion pipeline. Returns a list of query variants to search with.
+    If history is provided, the rewritten query acts as the contextualized base.
     """
-    rewritten = rewrite_query(query)
-    hyde = generate_hyde_passage(query)
+    rewritten = rewrite_query(query, history)
+    hyde = generate_hyde_passage(query, history)
 
-    # Deduplicate — if rewrite returns the same as original, don't search twice
+    # Deduplicate
     queries = [query]
     if rewritten.lower() != query.lower():
         queries.append(rewritten)

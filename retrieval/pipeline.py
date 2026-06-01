@@ -30,6 +30,7 @@ def search(
     top_n: int = 5,    # final chunks returned after reranking
     use_hyde: bool = True,
     use_rerank: bool = True,
+    history: list[dict] = None,
 ) -> list[dict]:
     """
     Full retrieval pipeline for a user query.
@@ -42,6 +43,7 @@ def search(
                     Can be disabled for speed if not needed.
         use_rerank: Whether to rerank results with Gemini.
                     Can be disabled to save API calls during testing.
+        history:    Recent chat history for context resolution.
 
     Returns:
         List of top_n chunk dicts, each with:
@@ -55,9 +57,13 @@ def search(
     print(f"\n[Pipeline] Query: {query!r}")
 
     if use_hyde:
-        query_variants = expand_query(query)
+        query_variants = expand_query(query, history=history)
     else:
-        query_variants = [query]
+        # If not using hyde but we have history, we still need to contextualize the base query
+        # to ensure the single variant actually searches for the right thing
+        from retrieval.query_rewriter import rewrite_query
+        contextualized = rewrite_query(query, history=history) if history else query
+        query_variants = [contextualized]
 
     print(f"[Pipeline] Searching with {len(query_variants)} query variant(s)...")
 

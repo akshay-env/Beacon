@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
         gfm: true
     });
 
+    let chatHistory = [];
+
     chatForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const query = userInput.value.trim();
@@ -38,7 +40,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ query: query })
+                body: JSON.stringify({ 
+                    query: query,
+                    history: chatHistory 
+                })
             });
 
             if (!response.ok) {
@@ -97,6 +102,13 @@ document.addEventListener('DOMContentLoaded', () => {
                                     botMessageEl.appendChild(sourcesDiv);
                                 }
                                 scrollToBottom();
+
+                                // Update history (keep last 6 messages = 3 turns)
+                                chatHistory.push({ role: 'user', content: query });
+                                chatHistory.push({ role: 'bot', content: fullText });
+                                if (chatHistory.length > 6) {
+                                    chatHistory = chatHistory.slice(chatHistory.length - 6);
+                                }
                             }
                         } catch (err) {
                             console.error('Error parsing SSE data:', err);

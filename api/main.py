@@ -90,9 +90,16 @@ app.add_middleware(
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+class HistoryItem(BaseModel):
+    role: str = Field(..., description="Role of the message sender, usually 'user' or 'bot'.")
+    content: str = Field(..., description="The content of the message.")
+
+
 class AskRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000,
                        description="The question to ask the RAG pipeline.")
+    history: list[HistoryItem] = Field(default=[],
+                                       description="Recent conversation history for context resolution.")
     top_k: int = Field(default=20, ge=1, le=100,
                        description="Number of candidate chunks to retrieve per query variant.")
     top_n: int = Field(default=5, ge=1, le=20,
@@ -162,6 +169,7 @@ async def ask_endpoint(request: AskRequest):
     try:
         result = ask(
             query=request.query,
+            history=[{"role": h.role, "content": h.content} for h in request.history],
             top_k=request.top_k,
             top_n=request.top_n,
             use_hyde=request.use_hyde,
@@ -249,16 +257,17 @@ async def ask_stream(request: AskRequest):
     # Run retrieval synchronously (it's a one-shot operation)
     from retrieval.pipeline import search
     try:
+        history_dicts = [{"role": h.role, "content": h.content} for h in request.history]
         chunks = await asyncio.to_thread(
             search, request.query, request.top_k, request.top_n,
-            request.use_hyde, request.use_rerank
+            request.use_hyde, request.use_rerank, history_dicts
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Retrieval error: {e}")
 
     async def event_generator():
         # Stream generation tokens
-        async for token in generate_stream(request.query, chunks):
+        async for token in generate_stream(request.query, chunks, history_dicts):
             yield f"data: {json.dumps({'token': token})}\n\n"
 
         # Final event: sources + done signal
