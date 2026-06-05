@@ -354,3 +354,16 @@ Added multi-turn conversational memory so users can ask follow-up questions refe
 2. **API (`main.py`)**: Added a `HistoryItem` Pydantic model to `AskRequest` to properly validate the incoming history array.
 3. **Query Rewriter (`query_rewriter.py`)**: Added a new `_CONTEXTUALIZE_PROMPT`. Before expanding or embedding a query, Gemini looks at the chat history and rewrites the user's latest question into a standalone, context-free search query (e.g., "Show me an example of it" -> "Show me an example of async middleware in FastAPI").
 4. **Generator (`generator.py`)**: The history array is formatted and injected directly into the generation prompt as `user`/`model` message pairs just above the final query. This gives the generator the conversational context needed to write coherent follow-up answers.
+
+---
+
+## June 06, 2026
+
+### Multi-format Ingestion (PDF & HTML)
+
+Expanded the ingestion engine to process PDFs and HTML files in addition to Markdown.
+
+**How it works:**
+1. **Dependencies**: Added `PyMuPDF` (blazing fast C-based PDF extraction) and `beautifulsoup4` (standard HTML parser).
+2. **Loader (`loader.py`)**: Updated to accept a list of file extensions. Uses `fitz.open()` for PDFs and `BeautifulSoup` for HTML to extract raw text seamlessly.
+3. **Chunker (`chunker.py`)**: Zero rewrites needed! The existing chunker is robust. For non-Markdown text, it treats the entire extracted text as a "preamble" and falls back perfectly to its recursive natural language splitting (`\n\n`, `. `, ` `) respecting the 1000 character limit.
